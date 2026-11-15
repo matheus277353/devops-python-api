@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="API DevOps de Tarefas",
-    description="API didática para demonstrar testes, CI e Docker.",
+    description="API didatica para demonstrar testes, CI e Docker.",
     version="1.0.0",
 )
 
@@ -27,7 +27,7 @@ tasks: list[Task] = []
 @app.get("/")
 def root() -> dict[str, str]:
     return {
-        "message": "API DevOps em execução",
+        "message": "API DevOps em execucao",
         "docs": "/docs",
     }
 

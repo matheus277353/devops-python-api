@@ -1,0 +1,159 @@
+﻿name: CD - Deploy na EC2 via ECR
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: devops-python-api
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1. Testes (obrigatorio antes do deploy)
+  # -------------------------------------------------------------------------
+  tests:
+    name: Testes automatizados
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Obter o codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Instalar dependencias
+        run: python -m pip install --requirement requirements-dev.txt
+
+      - name: Verificar analise estatica
+        run: ruff check .
+
+      - name: Executar testes
+        run: |
+          mkdir -p reports
+          pytest \
+            --cov=app \
+            --cov-report=term-missing \
+            --junitxml=reports/junit.xml
+
+      - name: Guardar relatorios
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorios-deploy-${{ github.sha }}
+          path: reports/junit.xml
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # 2. Build, tag e push da imagem para o Amazon ECR
+  # -------------------------------------------------------------------------
+  build-and-push:
+    name: Build e push para o ECR
+    needs: tests
+    runs-on: ubuntu-latest
+
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      - name: Obter o codigo
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciais AWS (AWS Academy)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login no Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag e push da imagem
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
+
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  # -------------------------------------------------------------------------
+  # 3. Deploy na instancia EC2
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Deploy na EC2
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH na instancia EC2
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          ECR_IMAGE: ${{ needs.build-and-push.outputs.image }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: ECR_IMAGE,AWS_REGION,AWS_ACCOUNT_ID,ECR_REPOSITORY,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN
+          script: |
+            # Configurar credenciais AWS na EC2 (AWS Academy usa session token)
+            export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+            export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+            export AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN
+            export AWS_DEFAULT_REGION=$AWS_REGION
+
+            # Autenticar no ECR
+            aws ecr get-login-password --region $AWS_REGION | \
+              docker login --username AWS --password-stdin \
+              $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+            # Parar e remover container antigo (se existir)
+            docker stop devops-python-api 2>/dev/null || true
+            docker rm devops-python-api 2>/dev/null || true
+
+            # Baixar a nova imagem
+            docker pull $ECR_IMAGE
+
+            # Iniciar novo container
+            docker run \
+              --detach \
+              --name devops-python-api \
+              --publish 8000:8000 \
+              --restart unless-stopped \
+              $ECR_IMAGE
+
+            # Verificar se a API esta respondendo
+            sleep 5
+            curl --fail --silent http://localhost:8000/health || exit 1
+
+            echo "Deploy concluido com sucesso!"
+            echo "Versao: $(curl --silent http://localhost:8000/health | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"version\"])')"
