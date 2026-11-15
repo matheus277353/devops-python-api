@@ -62,7 +62,7 @@ def test_health_retorna_versao(client):
     response = client.get("/health")
     data = response.json()
     assert "version" in data
-    assert data["version"] == "1.0.0"
+    assert data["version"] == "1.1.0"
 
 
 # ---------------------------------------------------------------------------
