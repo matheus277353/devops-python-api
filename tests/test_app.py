@@ -1,4 +1,4 @@
-﻿"""Testes automatizados para a API DevOps de Tarefas."""
+"""Testes automatizados para a API DevOps de Tarefas."""
 
 import pytest
 from fastapi.testclient import TestClient
