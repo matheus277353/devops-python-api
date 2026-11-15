@@ -57,4 +57,4 @@ def complete_task(task_id: int) -> Task:
         if task.id == task_id:
             task.done = True
             return task
-    raise HTTPException(status_code=404, detail="Tarefa nao encontrada")
+    raise HTTPException(status_code=404, detail="Tarefa não encontrada")
